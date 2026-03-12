@@ -33,5 +33,8 @@ void stopConfigMode();
 bool isInConfigMode();
 void resetWiFiConfig();
 void setLEDCallback(void (*callback)(int state));
+void updateLEDState(WiFiStatus status);
+void setLED(int state);
+void blinkLED(int times, int delayMs);
 
 #endif // !__WIFI_CONFIG_H

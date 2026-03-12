@@ -82,7 +82,7 @@ SemaphoreHandle_t xStateMutex = NULL;
  * @param brightnessVar 亮度变量
  * @param deviceName 设备名称
  */
-void handleDeviceControl(int device, bool state, bool &stateVar, int switchPin, int brightnessPin, int &brightnessVar, const char* deviceName) {
+void handleDeviceControl(const char* device, bool state, bool &stateVar, int switchPin, int brightnessPin, int &brightnessVar, const char* deviceName) {
     LOCK_STATE();
     stateVar = state;
     
@@ -113,7 +113,7 @@ void handleDeviceControl(int device, bool state, bool &stateVar, int switchPin, 
  * @param controlPin 控制引脚
  * @param controlName 控制名称
  */
-void handleDeviceControlValue(int device, int value, int &valueVar, bool powerState, int controlPin, const char* controlName) {
+void handleDeviceControlValue(const char* device, int value, int &valueVar, bool powerState, int controlPin, const char* controlName) {
     value = constrain(value, 0, 255);  // 确保在0-255范围内
     
     LOCK_STATE();
@@ -144,7 +144,7 @@ void handleDeviceControlValue(int device, int value, int &valueVar, bool powerSt
  * @param brightnessVar 亮度/速度变量
  * @param actionName 操作名称
  */
-void handleAutoDeviceControl(int device, bool shouldTurnOn, bool currentState, bool &stateVar, int switchPin, int brightnessVar, const char* actionName) {
+void handleAutoDeviceControl(const char* device, bool shouldTurnOn, bool currentState, bool &stateVar, int switchPin, int brightnessVar, const char* actionName) {
     if (shouldTurnOn && !currentState) {
         // 开启设备
         stateVar = true;
@@ -174,7 +174,8 @@ BLYNK_WRITE(VIRTUAL_PIN_LIGHT_SWITCH)
 BLYNK_WRITE(VIRTUAL_PIN_LIGHT_BRIGHTNESS)
 {
     int value = param.asInt();
-    handleDeviceControlValue(DEVICE_LIGHT, value, g_lightBrightness, g_lightPowerState, VIRTUAL_PIN_LIGHT_BRIGHTNESS, "灯光亮度");
+    int mappedValue = map(value, 0, 100, 0, 255);
+    handleDeviceControlValue(DEVICE_LIGHT, mappedValue, g_lightBrightness, g_lightPowerState, VIRTUAL_PIN_LIGHT_BRIGHTNESS, "灯光亮度");
 }
 
 // 风扇开关控制
@@ -188,7 +189,8 @@ BLYNK_WRITE(VIRTUAL_PIN_FAN_SWITCH)
 BLYNK_WRITE(VIRTUAL_PIN_FAN_SPEED)
 {
     int value = param.asInt();
-    handleDeviceControlValue(DEVICE_FAN, value, g_fanSpeed, g_fanPowerState, VIRTUAL_PIN_FAN_SPEED, "风扇速度");
+    int mappedValue = map(value, 0, 100, 0, 255);
+    handleDeviceControlValue(DEVICE_FAN, mappedValue, g_fanSpeed, g_fanPowerState, VIRTUAL_PIN_FAN_SPEED, "风扇速度");
 }
 
 // 自动模式控制
@@ -278,7 +280,7 @@ void smartControl() {
 void setup()
 {
   // Debug console
-  Serial.begin(9600);
+  Serial.begin(115200);
   Serial.println("ESP32 Starting...");
 
   // 初始化互斥锁
@@ -417,13 +419,6 @@ void vSmartControlTask(void *pvParameters)
                 
                 Blynk.virtualWrite(VIRTUAL_PIN_TEMPERATURE, temp);
                 Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_LEVEL, light);
-                
-                g_terminal.print("传感器数据 - 温度: ");
-                g_terminal.print(temp);
-                g_terminal.print("°C, 光照: ");
-                g_terminal.print(light);
-                g_terminal.println("lux");
-                g_terminal.flush();
             }
         } else {
             if (millis() - lastOnlineStatusUpdate >= ONLINE_STATUS_UPDATE_INTERVAL) {

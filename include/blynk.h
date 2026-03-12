@@ -1,4 +1,4 @@
-#ifndef __BLYNK_H
+#ifndef __BLYNK_HsmartControl
 #define __BLYNK_H
 
 // Blynk设备信息

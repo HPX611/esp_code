@@ -208,22 +208,28 @@ void checkClientConnections() {
 void processClientMessages() {
     // Process light client messages
     if (lightConnected && lightClient.available()) {
-        String message = lightClient.readStringUntil('\n');
-        message.trim();
-        lightLastConnectTime = millis();
-        
-        // Process the message
-        processMessage(message, DEVICE_LIGHT);
+        while (lightClient.available()) {
+            String message = lightClient.readStringUntil('\n');
+            message.trim();
+            if (!message.isEmpty()) {
+                lightLastConnectTime = millis();
+                // Process the message
+                processMessage(message, DEVICE_LIGHT);
+            }
+        }
     }
     
     // Process fan client messages
     if (fanConnected && fanClient.available()) {
-        String message = fanClient.readStringUntil('\n');
-        message.trim();
-        fanLastConnectTime = millis();
-        
-        // Process the message
-        processMessage(message, DEVICE_FAN);
+        while (fanClient.available()) {
+            String message = fanClient.readStringUntil('\n');
+            message.trim();
+            if (!message.isEmpty()) {
+                fanLastConnectTime = millis();
+                // Process the message
+                processMessage(message, DEVICE_FAN);
+            }
+        }
     }
 }
 
