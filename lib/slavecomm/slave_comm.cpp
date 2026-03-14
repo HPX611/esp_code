@@ -85,7 +85,7 @@ unsigned long fanLastConnectTime = 0;
  * @brief 连接超时时间
  * @details 从机连接的超时时间，单位为毫秒
  */
-const unsigned long CONNECTION_TIMEOUT = 10000;
+const unsigned long CONNECTION_TIMEOUT = 100000;
 
 /**
  * @brief 灯光从机电源状态
@@ -240,10 +240,10 @@ void processClientMessages() {
  * @details 解析并处理从机发送的消息，支持格式为"deviceId|statusType|parameter"
  */
 void processMessage(String message, const char* deviceId) {
-    Serial.print("Received from ");
-    Serial.print(deviceId);
-    Serial.print(": ");
-    Serial.println(message);
+    // Serial.print("Received from ");
+    // Serial.print(deviceId);
+    // Serial.print(": ");
+    // Serial.println(message);
     
     // Parse the message: deviceId|statusType|parameter
     int firstPipe = message.indexOf('|');
@@ -258,12 +258,12 @@ void processMessage(String message, const char* deviceId) {
         if (strcmp(deviceId, DEVICE_LIGHT) == 0) {
             if (statusType == "01") { // Power status
                 lightPowerState = (parameter == "1");
-                Serial.println("Light power state updated to: " + String(lightPowerState ? "ON" : "OFF"));
+                // Serial.println("Light power state updated to: " + String(lightPowerState ? "ON" : "OFF"));
             }
         } else if (strcmp(deviceId, DEVICE_FAN) == 0) {
             if (statusType == "01") { // Power status
                 fanPowerState = (parameter == "1");
-                Serial.println("Fan power state updated to: " + String(fanPowerState ? "ON" : "OFF"));
+                // Serial.println("Fan power state updated to: " + String(fanPowerState ? "ON" : "OFF"));
             }
         }
     }

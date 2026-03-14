@@ -33,6 +33,9 @@ const unsigned long RECONNECT_INTERVAL = 5000;  // 重连间隔
 const unsigned long BLINK_INTERVAL_WIFI = 1000; // WiFi未连接时LED闪烁间隔
 const unsigned long BLINK_INTERVAL_TCP = 500;   // TCP未连接时LED闪烁间隔
 
+// 心跳控制
+unsigned long lastHeartbeatTime = 0;
+const unsigned long HEARTBEAT_INTERVAL = 60000; // 60秒发送一次心跳 
 // ==================== 全局变量 ====================
 
 // WiFi客户端
@@ -49,10 +52,6 @@ unsigned long lastReconnectAttempt = 0;
 // LED状态控制
 unsigned long lastBlinkTime = 0;
 bool ledState = false;
-
-// 心跳控制
-unsigned long lastHeartbeatTime = 0;
-const unsigned long HEARTBEAT_INTERVAL = 5000; // 5秒发送一次心跳
 
 // ==================== 中断处理函数 ====================
 
@@ -169,7 +168,7 @@ void loop() {
         lastHeartbeatTime = millis();
         sendStatus();
     }
-    
+
     // 短暂延时
     delay(10);
 }

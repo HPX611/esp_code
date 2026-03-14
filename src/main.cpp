@@ -28,6 +28,7 @@ void vBlynkTask(void *pvParameters);
 void vSmartControlTask(void *pvParameters);
 void vTimeTask(void *pvParameters);
 void vWeatherTask(void *pvParameters);
+void vAutoModeButtonTask(void *pvParameters);
 
 // 全局状态变量
 bool g_lightPowerState = false;     // 灯光电源开关状态（开/关）
@@ -37,11 +38,14 @@ int g_fanSpeed = 255;               // 风扇速度值（0-255）
 bool g_autoMode = true;             // 自动模式状态
 
 // 智能控制阈值
-const int LIGHT_LEVEL_THRESHOLD = 30;    // 光照阈值（低于此值自动开灯）
-const int TEMPERATURE_THRESHOLD = 28;     // 温度阈值（高于此值自动开风扇）
+int LIGHT_LEVEL_THRESHOLD = 30;    // 光照阈值（低于此值自动开灯）
+int TEMPERATURE_THRESHOLD = 28;     // 温度阈值（高于此值自动开风扇）
 
 // Blynk应用程序的界面组件
 WidgetTerminal g_terminal(VIRTUAL_PIN_TERMINAL);
+
+// 自动模式物理按键
+const int AUTO_MODE_BUTTON_PIN = 25; // 自动模式物理按键
 
 // FreeRTOS任务句柄
 TaskHandle_t xWiFiTaskHandle = NULL;
@@ -52,6 +56,7 @@ TaskHandle_t xBlynkTaskHandle = NULL;
 TaskHandle_t xSmartControlTaskHandle = NULL;
 TaskHandle_t xTimeTaskHandle = NULL;
 TaskHandle_t xWeatherTaskHandle = NULL;
+TaskHandle_t xAutoModeButtonTaskHandle = NULL;
 
 // 同步原语 - 用于多线程环境下的资源保护
 SemaphoreHandle_t xStateMutex = NULL;
@@ -214,6 +219,42 @@ BLYNK_WRITE(VIRTUAL_PIN_AUTO_MODE)
     UNLOCK_STATE();
 }
 
+// 终端输入处理
+BLYNK_WRITE(VIRTUAL_PIN_TERMINAL)
+{
+    String input = param.asStr();
+    input.trim();
+    
+    // 处理阈值调整命令
+    if (input.length() > 0) {
+        // 解析输入的两个整数
+        int firstSpace = input.indexOf(' ');
+        if (firstSpace != -1) {
+            String tempStr = input.substring(0, firstSpace);
+            String lightStr = input.substring(firstSpace + 1);
+            
+            int newTemp = tempStr.toInt();
+            int newLight = lightStr.toInt();
+            
+            if (newTemp > 0 && newLight > 0) {
+                TEMPERATURE_THRESHOLD = newTemp;
+                LIGHT_LEVEL_THRESHOLD = newLight;
+                
+                Serial.print("阈值已更新 - 温度: ");
+                Serial.print(TEMPERATURE_THRESHOLD);
+                Serial.print(", 光照: ");
+                Serial.println(LIGHT_LEVEL_THRESHOLD);
+                
+                g_terminal.print("阈值已更新 - 温度: ");
+                g_terminal.print(TEMPERATURE_THRESHOLD);
+                g_terminal.print(", 光照: ");
+                g_terminal.println(LIGHT_LEVEL_THRESHOLD);
+            }
+        }
+    }
+    g_terminal.flush();
+}
+
 // WiFi配置重置控制
 BLYNK_WRITE(VIRTUAL_PIN_WIFI_RESET)
 {
@@ -309,6 +350,9 @@ void setup()
   
   // 初始化图标管理器
   iconManagerSetup();
+  
+  // 初始化自动模式物理按键
+  pinMode(AUTO_MODE_BUTTON_PIN, INPUT_PULLUP);
 
   // 如果WiFi未处于配网模式，则配置Blynk
   if (!isInConfigMode()) {
@@ -339,8 +383,12 @@ void setup()
 
   // 天气管理任务 - 核心1
   CREATE_TASK(vWeatherTask, "Weather Task", 4096, 2, xWeatherTaskHandle, 1);
+  
+  // 自动模式按键处理任务 - 核心1
+  CREATE_TASK(vAutoModeButtonTask, "Auto Mode Button Task", 2048, 3, xAutoModeButtonTaskHandle, 1);
 
   Serial.println("All tasks created successfully!");
+  Serial.println("物理按键已配置 - 用于离线控制自动模式");
 }
 
 // WiFi任务函数
@@ -348,7 +396,7 @@ void vWiFiTask(void *pvParameters)
 {
     while (1) {
         wifiLoop();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(100)); // 增加延迟，减少任务切换
     }
 }
 
@@ -357,7 +405,7 @@ void vSlaveCommTask(void *pvParameters)
 {
     while (1) {
         slaveCommLoop();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(50)); // 增加延迟，减少任务切换
     }
 }
 
@@ -366,7 +414,7 @@ void vSensorsTask(void *pvParameters)
 {
     while (1) {
         sensorsLoop();
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(100)); // 增加延迟，减少任务切换
     }
 }
 
@@ -375,18 +423,31 @@ void vOledTask(void *pvParameters)
 {
     while (1) {
         oledLoop();
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(200)); // 增加延迟，减少任务切换
     }
 }
 
 // Blynk任务函数
 void vBlynkTask(void *pvParameters)
 {
+    unsigned long lastReconnectAttempt = 0;
+    const unsigned long RECONNECT_INTERVAL = 30000; // 30秒重连间隔
+    
     while (1) {
         if (isWiFiConnected()) {
             Blynk.run();
+            
+            // 检查Blynk连接状态
+            if (!Blynk.connected()) {
+                if (millis() - lastReconnectAttempt > RECONNECT_INTERVAL) {
+                    lastReconnectAttempt = millis();
+                    Serial.println("Blynk disconnected, attempting to reconnect...");
+                    Blynk.config(BLYNK_AUTH_TOKEN);
+                    Blynk.connect();
+                }
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(100)); // 增加延迟，减少任务切换
     }
 }
 
@@ -395,8 +456,8 @@ void vSmartControlTask(void *pvParameters)
 {
     unsigned long lastOnlineStatusUpdate = 0;
     unsigned long lastSensorDataUpdate = 0;
-    const unsigned long ONLINE_STATUS_UPDATE_INTERVAL = 2000; // 每2秒更新一次在线状态
-    const unsigned long SENSOR_DATA_UPDATE_INTERVAL = 1000; // 每1秒更新一次传感器数据
+    const unsigned long ONLINE_STATUS_UPDATE_INTERVAL = 5000; // 每5秒更新一次在线状态
+    const unsigned long SENSOR_DATA_UPDATE_INTERVAL = 2000; // 每2秒更新一次传感器数据
     
     while (1) {
         smartControl();
@@ -416,9 +477,19 @@ void vSmartControlTask(void *pvParameters)
                 
                 float temp = getTemperature();
                 int light = getLightLevel();
+                bool motion = isMotionDetected();
                 
                 Blynk.virtualWrite(VIRTUAL_PIN_TEMPERATURE, temp);
                 Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_LEVEL, light);
+                Blynk.virtualWrite(VIRTUAL_PIN_MOTION_DETECTION, motion ? 1 : 0);
+                
+                // 发送映射后的速度和亮度数据
+                LOCK_STATE();
+                int mappedFanSpeed = map(g_fanSpeed, 0, 255, 0, 100);
+                int mappedLightBrightness = map(g_lightBrightness, 0, 255, 0, 100);
+                Blynk.virtualWrite(VIRTUAL_PIN_FAN_SPEED, mappedFanSpeed);
+                Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_BRIGHTNESS, mappedLightBrightness);
+                UNLOCK_STATE();
             }
         } else {
             if (millis() - lastOnlineStatusUpdate >= ONLINE_STATUS_UPDATE_INTERVAL) {
@@ -437,7 +508,7 @@ void vTimeTask(void *pvParameters)
 {
     while (1) {
         updateTime();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 增加延迟，减少任务切换
     }
 }
 
@@ -446,7 +517,38 @@ void vWeatherTask(void *pvParameters)
 {
     while (1) {
         weatherLoop();
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(60000)); // 增加延迟到60秒，天气数据不需要频繁更新
+    }
+}
+
+// 自动模式按键处理任务
+void vAutoModeButtonTask(void *pvParameters)
+{
+    bool lastButtonState = HIGH;
+    unsigned long lastDebounceTime = 0;
+    const unsigned long debounceDelay = 50;
+    
+    while (1) {
+        int buttonState = digitalRead(AUTO_MODE_BUTTON_PIN);
+        
+        if (buttonState != lastButtonState) {
+            lastDebounceTime = millis();
+        }
+        
+        if ((millis() - lastDebounceTime) > debounceDelay) {
+            if (buttonState == LOW && lastButtonState == HIGH) {
+                // 按键按下
+                LOCK_STATE();
+                g_autoMode = !g_autoMode;
+                Serial.print("物理按键 - 自动模式: ");
+                Serial.println(g_autoMode ? "ON" : "OFF");
+                updateIconState(ICON_AUTO, g_autoMode ? ICON_STATE_ON : ICON_STATE_OFF);
+                UNLOCK_STATE();
+            }
+        }
+        
+        lastButtonState = buttonState;
+        vTaskDelay(pdMS_TO_TICKS(50)); // 增加延迟，减少任务切换
     }
 }
 

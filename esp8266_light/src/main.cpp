@@ -50,6 +50,10 @@ unsigned long lastReconnectAttempt = 0;
 unsigned long lastBlinkTime = 0;
 bool ledState = false;
 
+// 心跳控制
+unsigned long lastHeartbeatTime = 0;
+const unsigned long HEARTBEAT_INTERVAL = 5000; // 5秒发送一次心跳
+
 // ==================== 中断处理函数 ====================
 
 IRAM_ATTR void powerButtonISR() {
@@ -157,6 +161,12 @@ void loop() {
         statusChanged = false;
         sendStatus();
         Serial.println("Status changed - Power: " + String(powerState ? "ON" : "OFF") + ", Brightness: " + String(brightness));
+    }
+    
+    // 发送心跳
+    if (client.connected() && millis() - lastHeartbeatTime > HEARTBEAT_INTERVAL) {
+        lastHeartbeatTime = millis();
+        sendStatus();
     }
     
     // 短暂延时
