@@ -4,6 +4,10 @@
 #define BLYNK_PRINT Serial
 #include "../include/blynk.h"
 #include <BlynkSimpleEsp32.h>
+// #include <BlynkTimer.h>
+
+// 全局定时器对象
+BlynkTimer timer;
 
 // FreeRTOS头文件 - 用于多线程任务管理
 #include <freertos/FreeRTOS.h>
@@ -16,19 +20,13 @@
 #include <sensors.h>
 #include <oled_display.h>
 #include "../lib/time/time_manager.h"
-#include "../lib/weather/weather_manager.h"
 #include "../lib/icon/icon_manager.h"
 
 // FreeRTOS任务函数声明
 void vWiFiTask(void *pvParameters);
 void vSlaveCommTask(void *pvParameters);
-void vSensorsTask(void *pvParameters);
-void vOledTask(void *pvParameters);
-void vBlynkTask(void *pvParameters);
-void vSmartControlTask(void *pvParameters);
-void vTimeTask(void *pvParameters);
-void vWeatherTask(void *pvParameters);
 void vAutoModeButtonTask(void *pvParameters);
+void vBlynkTask(void *pvParameters);
 
 // 全局状态变量
 bool g_lightPowerState = false;     // 灯光电源开关状态（开/关）
@@ -50,13 +48,8 @@ const int AUTO_MODE_BUTTON_PIN = 25; // 自动模式物理按键
 // FreeRTOS任务句柄
 TaskHandle_t xWiFiTaskHandle = NULL;
 TaskHandle_t xSlaveCommTaskHandle = NULL;
-TaskHandle_t xSensorsTaskHandle = NULL;
-TaskHandle_t xOledTaskHandle = NULL;
-TaskHandle_t xBlynkTaskHandle = NULL;
-TaskHandle_t xSmartControlTaskHandle = NULL;
-TaskHandle_t xTimeTaskHandle = NULL;
-TaskHandle_t xWeatherTaskHandle = NULL;
 TaskHandle_t xAutoModeButtonTaskHandle = NULL;
+TaskHandle_t xBlynkTaskHandle = NULL;
 
 // 同步原语 - 用于多线程环境下的资源保护
 SemaphoreHandle_t xStateMutex = NULL;
@@ -172,6 +165,8 @@ void handleAutoDeviceControl(const char* device, bool shouldTurnOn, bool current
 BLYNK_WRITE(VIRTUAL_PIN_LIGHT_SWITCH)
 {
     int value = param.asInt();
+    Serial.print("[Blynk] Light switch pressed: ");
+    Serial.println(value);
     handleDeviceControl(DEVICE_LIGHT, (value == 1), g_lightPowerState, VIRTUAL_PIN_LIGHT_SWITCH, VIRTUAL_PIN_LIGHT_BRIGHTNESS, g_lightBrightness, "灯光开关");
 }
 
@@ -273,16 +268,30 @@ BLYNK_WRITE(VIRTUAL_PIN_WIFI_RESET)
 // 连接成功时同步状态
 BLYNK_CONNECTED()
 {
-    Serial.println("Blynk连接成功,同步状态...");
+    Serial.println("[Blynk] Connected, syncing state...");
     g_terminal.println("Blynk连接成功,同步状态...");
     
     // 获取互斥锁保护全局变量
     LOCK_STATE();
     // 同步设备状态
+    Serial.print("[Blynk] Syncing light switch: ");
+    Serial.println(g_lightPowerState ? 1 : 0);
     Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_SWITCH, g_lightPowerState ? 1 : 0);
+    
+    Serial.print("[Blynk] Syncing light brightness: ");
+    Serial.println(g_lightBrightness);
     Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_BRIGHTNESS, g_lightBrightness);
+    
+    Serial.print("[Blynk] Syncing fan switch: ");
+    Serial.println(g_fanPowerState ? 1 : 0);
     Blynk.virtualWrite(VIRTUAL_PIN_FAN_SWITCH, g_fanPowerState ? 1 : 0);
+    
+    Serial.print("[Blynk] Syncing fan speed: ");
+    Serial.println(g_fanSpeed);
     Blynk.virtualWrite(VIRTUAL_PIN_FAN_SPEED, g_fanSpeed);
+    
+    Serial.print("[Blynk] Syncing auto mode: ");
+    Serial.println(g_autoMode ? 1 : 0);
     Blynk.virtualWrite(VIRTUAL_PIN_AUTO_MODE, g_autoMode ? 1 : 0);
     
     // 同步设备在线状态
@@ -291,6 +300,8 @@ BLYNK_CONNECTED()
     
     // 释放互斥锁
     UNLOCK_STATE();
+    
+    Serial.println("[Blynk] State sync completed");
 }
 
 // 智能控制逻辑
@@ -345,9 +356,6 @@ void setup()
   // 初始化时间管理
   timeSetup();
   
-  // 初始化天气管理
-  weatherSetup();
-  
   // 初始化图标管理器
   iconManagerSetup();
   
@@ -359,32 +367,75 @@ void setup()
     Blynk.config(BLYNK_AUTH_TOKEN);
   }
 
-  // 创建FreeRTOS任务
-  // WiFi任务 - 核心0
-  CREATE_TASK(vWiFiTask, "WiFi Task", 4096, 3, xWiFiTaskHandle, 0);
-
-  // 从机通信任务 - 核心0
-  CREATE_TASK(vSlaveCommTask, "Slave Comm Task", 8192, 4, xSlaveCommTaskHandle, 0);
-
-  // 传感器任务 - 核心1
-  CREATE_TASK(vSensorsTask, "Sensors Task", 4096, 4, xSensorsTaskHandle, 1);
-
-  // OLED显示任务 - 核心1
-  CREATE_TASK(vOledTask, "OLED Task", 4096, 2, xOledTaskHandle, 1);
-
-  // Blynk任务 - 核心0
-  CREATE_TASK(vBlynkTask, "Blynk Task", 4096, 3, xBlynkTaskHandle, 0);
-
-  // 智能控制任务 - 核心1
-  CREATE_TASK(vSmartControlTask, "Smart Control Task", 4096, 3, xSmartControlTaskHandle, 1);
-
-  // 时间管理任务 - 核心0
-  CREATE_TASK(vTimeTask, "Time Task", 4096, 5, xTimeTaskHandle, 0);
-
-  // 天气管理任务 - 核心1
-  CREATE_TASK(vWeatherTask, "Weather Task", 4096, 2, xWeatherTaskHandle, 1);
+  // 使用BlynkTimer替代部分FreeRTOS任务
+  // 传感器任务 - 每3秒执行一次
+  timer.setInterval(3000L, []() {
+    sensorsLoop();
+  });
   
-  // 自动模式按键处理任务 - 核心1
+  // 智能控制任务 - 每500毫秒执行一次
+  timer.setInterval(500L, []() {
+    smartControl();
+  });
+  
+  // 在线状态更新 - 每10秒执行一次
+  timer.setInterval(10000L, []() {
+    if (isWiFiConnected()) {
+      LOCK_STATE();
+      Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_ONLINE, isLightConnected() ? 1 : 0);
+      Blynk.virtualWrite(VIRTUAL_PIN_FAN_ONLINE, isFanConnected() ? 1 : 0);
+      UNLOCK_STATE();
+    } else {
+      Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_ONLINE, 0);
+      Blynk.virtualWrite(VIRTUAL_PIN_FAN_ONLINE, 0);
+    }
+  });
+  
+  // 传感器数据更新 - 每3秒执行一次
+  timer.setInterval(3000L, []() {
+    if (isWiFiConnected()) {
+      float temp = getTemperature();
+      int light = getLightLevel();
+      bool motion = isMotionDetected();
+      
+      Blynk.virtualWrite(VIRTUAL_PIN_TEMPERATURE, temp);
+      Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_LEVEL, light);
+      Blynk.virtualWrite(VIRTUAL_PIN_MOTION_DETECTION, motion ? 1 : 0);
+      
+      // 发送映射后的速度和亮度数据
+      LOCK_STATE();
+      int mappedFanSpeed = map(g_fanSpeed, 0, 255, 0, 100);
+      int mappedLightBrightness = map(g_lightBrightness, 0, 255, 0, 100);
+      Blynk.virtualWrite(VIRTUAL_PIN_FAN_SPEED, mappedFanSpeed);
+      Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_BRIGHTNESS, mappedLightBrightness);
+      UNLOCK_STATE();
+    }
+  });
+  
+  // 时间管理任务 - 每秒执行一次
+  timer.setInterval(1000L, []() {
+    updateTime();
+  });
+  
+  // OLED显示任务 - 每500毫秒执行一次
+  timer.setInterval(500L, []() {
+    oledLoop();
+  });
+
+  // 创建FreeRTOS任务
+  // Blynk任务 - 核心1，优先级2（按照最佳实践）
+  CREATE_TASK(vBlynkTask, "Blynk Task", 8192, 2, xBlynkTaskHandle, 1);
+
+  // 核心1：运行所有其他任务
+  // WiFi任务 - 核心1，优先级1
+  CREATE_TASK(vWiFiTask, "WiFi Task", 4096, 1, xWiFiTaskHandle, 1);
+
+  // 从机通信任务 - 核心1，优先级3
+  CREATE_TASK(vSlaveCommTask, "Slave Comm Task", 8192, 3, xSlaveCommTaskHandle, 1);
+
+
+  
+  // 自动模式按键处理任务 - 核心1，优先级3
   CREATE_TASK(vAutoModeButtonTask, "Auto Mode Button Task", 2048, 3, xAutoModeButtonTaskHandle, 1);
 
   Serial.println("All tasks created successfully!");
@@ -396,7 +447,7 @@ void vWiFiTask(void *pvParameters)
 {
     while (1) {
         wifiLoop();
-        vTaskDelay(pdMS_TO_TICKS(100)); // 增加延迟，减少任务切换
+        vTaskDelay(pdMS_TO_TICKS(10)); // 增加延迟，减少任务切换
     }
 }
 
@@ -409,117 +460,52 @@ void vSlaveCommTask(void *pvParameters)
     }
 }
 
-// 传感器任务函数
-void vSensorsTask(void *pvParameters)
-{
-    while (1) {
-        sensorsLoop();
-        vTaskDelay(pdMS_TO_TICKS(100)); // 增加延迟，减少任务切换
-    }
+
+
+
+
+// 打印内存使用情况
+void printMemoryInfo() {
+    // 打印堆内存使用情况
+    size_t freeHeap = ESP.getFreeHeap();
+    size_t minimumFreeHeap = ESP.getMinFreeHeap();
+    size_t heapSize = ESP.getHeapSize();
+    
+    Serial.print("[Memory] Free heap: ");
+    Serial.print(freeHeap);
+    Serial.print(" bytes, Min free heap: ");
+    Serial.print(minimumFreeHeap);
+    Serial.print(" bytes, Total heap: ");
+    Serial.print(heapSize);
+    Serial.println(" bytes");
+    
+    // 打印任务信息
+    UBaseType_t uxCurrentNumberOfTasks = uxTaskGetNumberOfTasks();
+    Serial.print("[Memory] Number of tasks: ");
+    Serial.println(uxCurrentNumberOfTasks);
 }
 
-// OLED显示任务函数
-void vOledTask(void *pvParameters)
-{
-    while (1) {
-        oledLoop();
-        vTaskDelay(pdMS_TO_TICKS(200)); // 增加延迟，减少任务切换
-    }
-}
-
-// Blynk任务函数
+// Blynk任务函数（核心1版本）
 void vBlynkTask(void *pvParameters)
 {
-    unsigned long lastReconnectAttempt = 0;
-    const unsigned long RECONNECT_INTERVAL = 30000; // 30秒重连间隔
+    // 如果WiFi未处于配网模式，则配置Blynk
+    if (!isInConfigMode()) {
+        Blynk.config(BLYNK_AUTH_TOKEN);
+    }
     
-    while (1) {
-        if (isWiFiConnected()) {
-            Blynk.run();
-            
-            // 检查Blynk连接状态
-            if (!Blynk.connected()) {
-                if (millis() - lastReconnectAttempt > RECONNECT_INTERVAL) {
-                    lastReconnectAttempt = millis();
-                    Serial.println("Blynk disconnected, attempting to reconnect...");
-                    Blynk.config(BLYNK_AUTH_TOKEN);
-                    Blynk.connect();
-                }
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(100)); // 增加延迟，减少任务切换
+    while(1) {
+        // 核心操作：频繁调用 Blynk.run()
+        Blynk.run();
+        // 运行Blynk定时器任务
+        timer.run();
+        // 短延迟，确保任务响应及时
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
-// 智能控制任务函数
-void vSmartControlTask(void *pvParameters)
-{
-    unsigned long lastOnlineStatusUpdate = 0;
-    unsigned long lastSensorDataUpdate = 0;
-    const unsigned long ONLINE_STATUS_UPDATE_INTERVAL = 5000; // 每5秒更新一次在线状态
-    const unsigned long SENSOR_DATA_UPDATE_INTERVAL = 2000; // 每2秒更新一次传感器数据
-    
-    while (1) {
-        smartControl();
-        
-        if (isWiFiConnected()) {
-            if (millis() - lastOnlineStatusUpdate >= ONLINE_STATUS_UPDATE_INTERVAL) {
-                lastOnlineStatusUpdate = millis();
-                
-                LOCK_STATE();
-                Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_ONLINE, isLightConnected() ? 1 : 0);
-                Blynk.virtualWrite(VIRTUAL_PIN_FAN_ONLINE, isFanConnected() ? 1 : 0);
-                UNLOCK_STATE();
-            }
-            
-            if (millis() - lastSensorDataUpdate >= SENSOR_DATA_UPDATE_INTERVAL) {
-                lastSensorDataUpdate = millis();
-                
-                float temp = getTemperature();
-                int light = getLightLevel();
-                bool motion = isMotionDetected();
-                
-                Blynk.virtualWrite(VIRTUAL_PIN_TEMPERATURE, temp);
-                Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_LEVEL, light);
-                Blynk.virtualWrite(VIRTUAL_PIN_MOTION_DETECTION, motion ? 1 : 0);
-                
-                // 发送映射后的速度和亮度数据
-                LOCK_STATE();
-                int mappedFanSpeed = map(g_fanSpeed, 0, 255, 0, 100);
-                int mappedLightBrightness = map(g_lightBrightness, 0, 255, 0, 100);
-                Blynk.virtualWrite(VIRTUAL_PIN_FAN_SPEED, mappedFanSpeed);
-                Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_BRIGHTNESS, mappedLightBrightness);
-                UNLOCK_STATE();
-            }
-        } else {
-            if (millis() - lastOnlineStatusUpdate >= ONLINE_STATUS_UPDATE_INTERVAL) {
-                lastOnlineStatusUpdate = millis();
-                
-                Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_ONLINE, 0);
-                Blynk.virtualWrite(VIRTUAL_PIN_FAN_ONLINE, 0);
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-}
 
-// 时间管理任务函数
-void vTimeTask(void *pvParameters)
-{
-    while (1) {
-        updateTime();
-        vTaskDelay(pdMS_TO_TICKS(1000)); // 增加延迟，减少任务切换
-    }
-}
 
-// 天气管理任务函数
-void vWeatherTask(void *pvParameters)
-{
-    while (1) {
-        weatherLoop();
-        vTaskDelay(pdMS_TO_TICKS(60000)); // 增加延迟到60秒，天气数据不需要频繁更新
-    }
-}
+
 
 // 自动模式按键处理任务
 void vAutoModeButtonTask(void *pvParameters)
@@ -554,6 +540,11 @@ void vAutoModeButtonTask(void *pvParameters)
 
 void loop()
 {
-    // 主循环留空，所有任务都在FreeRTOS任务中运行
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    // // 运行Blynk和定时器
+    // Blynk.run();
+    // timer.run();
+    vTaskDelay(pdMS_TO_TICKS(100000));
+//       // 打印loop()所在核心
+//   Serial.print("loop() 运行在核心：");
+//   Serial.println(xPortGetCoreID());
 }

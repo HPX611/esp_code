@@ -19,6 +19,5 @@ void handleButtonInput();
 void drawWiFiIcon(int x, int y, int signalStrength);
 void drawFanIcon(int x, int y, bool isRunning);
 void drawLightIcon(int x, int y, bool isOn);
-void drawWeatherIcon(int x, int y, String weather);
 
 #endif // OLED_DISPLAY_H

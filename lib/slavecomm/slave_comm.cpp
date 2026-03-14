@@ -85,7 +85,7 @@ unsigned long fanLastConnectTime = 0;
  * @brief 连接超时时间
  * @details 从机连接的超时时间，单位为毫秒
  */
-const unsigned long CONNECTION_TIMEOUT = 100000;
+const unsigned long CONNECTION_TIMEOUT = 10000;
 
 /**
  * @brief 灯光从机电源状态

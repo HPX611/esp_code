@@ -3,7 +3,6 @@
 #include <slave_comm.h>
 #include <WiFi.h>
 #include "../time/time_manager.h"
-#include "../weather/weather_manager.h"
 #include "../icon/icon_manager.h"
 
 // OLED display object
@@ -310,20 +309,7 @@ void updateDisplay() {
         updateIconState(ICON_AUTO, ICON_STATE_OFF);
     }
     
-    // Display weather information
-    int weatherX = iconWidth * 3;
-    int weatherY = iconsY;
-    display.setTextSize(1);
-    display.setCursor(weatherX, weatherY);
-    // 限制天气描述长度，避免显示问题
-    String weatherDesc = getWeatherDescription();
-    if (weatherDesc.length() > 4) {
-        weatherDesc = weatherDesc.substring(0, 4);
-    }
-    display.print(weatherDesc);
-    display.setCursor(weatherX, weatherY + 10);
-    float weatherTemp = getWeatherTemperature();
-    display.print(String(weatherTemp) + "°C");
+
     
 
     
