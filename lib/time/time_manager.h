@@ -24,5 +24,6 @@ extern bool networkConnected;
 // 函数声明
 void timeSetup();
 void updateTime();
+String getFormattedTime();
 
 #endif // TIME_MANAGER_H

@@ -12,6 +12,9 @@ bool lastMotionState = false;
 
 unsigned long lastDHTReadTime = 0;
 unsigned long lastLightReadTime = 0;
+unsigned long lastMotionDetectedTime = 0;
+
+const unsigned long MOTION_TIMEOUT = 60000; // 30秒的超时时间，可根据实际需要调整
 
 const unsigned long DHT_READ_INTERVAL = 2000;
 const unsigned long LIGHT_READ_INTERVAL = 1000;
@@ -74,8 +77,18 @@ void sensorsLoop() {
     bool currentMotionState = digitalRead(PIR_PIN);
     
     if (currentMotionState != lastMotionState) {
-        motionDetected = (currentMotionState == HIGH);
         lastMotionState = currentMotionState;
+        if (currentMotionState == HIGH) {
+            lastMotionDetectedTime = millis();
+            motionDetected = true;
+        }
+    }
+    
+    // 检查是否在超时时间内，确保静止时也能检测到人体存在
+    if (millis() - lastMotionDetectedTime <= MOTION_TIMEOUT) {
+        motionDetected = true;
+    } else {
+        motionDetected = false;
     }
 }
 

@@ -13,7 +13,6 @@ typedef enum {
     ICON_FAN,       // 风扇图标
     ICON_AUTO,      // 自动模式图标
     ICON_WIFI,      // WiFi图标
-    ICON_WEATHER,   // 天气图标
     ICON_COUNT      // 图标总数
 } IconType;
 

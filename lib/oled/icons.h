@@ -7,8 +7,7 @@
 enum IconType {
     ICON_LIGHT,
     ICON_FAN,
-    ICON_WIFI,
-    ICON_WEATHER
+    ICON_WIFI
 };
 
 #endif // ICONS_H

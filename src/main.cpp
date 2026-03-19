@@ -25,8 +25,11 @@ BlynkTimer timer;
 // FreeRTOS任务函数声明
 void vWiFiTask(void *pvParameters);
 void vSlaveCommTask(void *pvParameters);
-void vAutoModeButtonTask(void *pvParameters);
 void vBlynkTask(void *pvParameters);
+
+// 中断处理函数声明
+IRAM_ATTR void autoModeButtonISR();
+IRAM_ATTR void wifiResetButtonISR();
 
 // 全局状态变量
 bool g_lightPowerState = false;     // 灯光电源开关状态（开/关）
@@ -44,6 +47,11 @@ WidgetTerminal g_terminal(VIRTUAL_PIN_TERMINAL);
 
 // 自动模式物理按键
 const int AUTO_MODE_BUTTON_PIN = 25; // 自动模式物理按键
+// 网络配置重置按键
+const int WIFI_RESET_BUTTON_PIN = 26; // 网络配置重置物理按键
+
+// 按键去抖延迟
+const unsigned long debounceDelay = 50;
 
 // FreeRTOS任务句柄
 TaskHandle_t xWiFiTaskHandle = NULL;
@@ -57,6 +65,36 @@ SemaphoreHandle_t xStateMutex = NULL;
 // 互斥锁操作宏，简化代码
 #define LOCK_STATE() xSemaphoreTake(xStateMutex, portMAX_DELAY)
 #define UNLOCK_STATE() xSemaphoreGive(xStateMutex)
+
+// 中断处理函数
+IRAM_ATTR void autoModeButtonISR() {
+    unsigned long debounceStart = millis();
+    while((millis() - debounceStart) < debounceDelay);
+    
+    // 检查按键是否仍然按下
+    if (digitalRead(AUTO_MODE_BUTTON_PIN) == LOW) {
+        // LOCK_STATE();
+        g_autoMode = !g_autoMode;
+        // Serial.print("物理按键 - 自动模式: ");
+        // Serial.println(g_autoMode ? "ON" : "OFF");
+        updateIconState(ICON_AUTO, g_autoMode ? ICON_STATE_ON : ICON_STATE_OFF);
+        // UNLOCK_STATE();
+    }
+}
+
+IRAM_ATTR void wifiResetButtonISR() {
+    unsigned long debounceStart = millis();
+    while((millis() - debounceStart) < debounceDelay);
+    
+    // 检查按键是否仍然按下
+    if (digitalRead(WIFI_RESET_BUTTON_PIN) == LOW) {
+        // Serial.println("物理按键 - WiFi配置重置请求...");
+        // g_terminal.println("物理按键 - WiFi配置重置请求...");
+        // 重置WiFi配置
+        resetWiFiConfig();
+        // 注意：resetWiFiConfig()函数会重启设备，所以下面的代码不会执行
+    }
+}
 
 // 任务创建宏，简化代码
 #define CREATE_TASK(task_func, task_name, stack_size, priority, task_handle, core_id) \
@@ -316,7 +354,7 @@ void smartControl() {
     bool motion = isMotionDetected();
     int lightLevel = getLightLevel();
     float temperature = getTemperature();
-    
+
     // 基于人体检测和光照的灯光控制
     bool shouldTurnOnLight = motion && (lightLevel < LIGHT_LEVEL_THRESHOLD);
     handleAutoDeviceControl(DEVICE_LIGHT, shouldTurnOnLight, g_lightPowerState, g_lightPowerState, VIRTUAL_PIN_LIGHT_SWITCH, g_lightBrightness, shouldTurnOnLight ? "开灯" : "关灯");
@@ -361,6 +399,12 @@ void setup()
   
   // 初始化自动模式物理按键
   pinMode(AUTO_MODE_BUTTON_PIN, INPUT_PULLUP);
+  // 初始化网络配置重置按键
+  pinMode(WIFI_RESET_BUTTON_PIN, INPUT_PULLUP);
+  
+  // 附加中断
+  attachInterrupt(digitalPinToInterrupt(AUTO_MODE_BUTTON_PIN), autoModeButtonISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(WIFI_RESET_BUTTON_PIN), wifiResetButtonISR, FALLING);
 
   // 如果WiFi未处于配网模式，则配置Blynk
   if (!isInConfigMode()) {
@@ -397,7 +441,6 @@ void setup()
       float temp = getTemperature();
       int light = getLightLevel();
       bool motion = isMotionDetected();
-      
       Blynk.virtualWrite(VIRTUAL_PIN_TEMPERATURE, temp);
       Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_LEVEL, light);
       Blynk.virtualWrite(VIRTUAL_PIN_MOTION_DETECTION, motion ? 1 : 0);
@@ -435,11 +478,12 @@ void setup()
 
 
   
-  // 自动模式按键处理任务 - 核心1，优先级3
-  CREATE_TASK(vAutoModeButtonTask, "Auto Mode Button Task", 2048, 3, xAutoModeButtonTaskHandle, 1);
+  // 按键现在使用中断方式处理，不再需要轮询任务
 
   Serial.println("All tasks created successfully!");
-  Serial.println("物理按键已配置 - 用于离线控制自动模式");
+  Serial.println("物理按键已配置 - 用于离线控制自动模式和网络重置");
+  Serial.print("网络重置按键引脚: ");
+  Serial.println(WIFI_RESET_BUTTON_PIN);
 }
 
 // WiFi任务函数
@@ -507,44 +551,9 @@ void vBlynkTask(void *pvParameters)
 
 
 
-// 自动模式按键处理任务
-void vAutoModeButtonTask(void *pvParameters)
-{
-    bool lastButtonState = HIGH;
-    unsigned long lastDebounceTime = 0;
-    const unsigned long debounceDelay = 50;
-    
-    while (1) {
-        int buttonState = digitalRead(AUTO_MODE_BUTTON_PIN);
-        
-        if (buttonState != lastButtonState) {
-            lastDebounceTime = millis();
-        }
-        
-        if ((millis() - lastDebounceTime) > debounceDelay) {
-            if (buttonState == LOW && lastButtonState == HIGH) {
-                // 按键按下
-                LOCK_STATE();
-                g_autoMode = !g_autoMode;
-                Serial.print("物理按键 - 自动模式: ");
-                Serial.println(g_autoMode ? "ON" : "OFF");
-                updateIconState(ICON_AUTO, g_autoMode ? ICON_STATE_ON : ICON_STATE_OFF);
-                UNLOCK_STATE();
-            }
-        }
-        
-        lastButtonState = buttonState;
-        vTaskDelay(pdMS_TO_TICKS(50)); // 增加延迟，减少任务切换
-    }
-}
+// 按键现在使用中断方式处理，原有的轮询任务已移除
 
 void loop()
 {
-    // // 运行Blynk和定时器
-    // Blynk.run();
-    // timer.run();
     vTaskDelay(pdMS_TO_TICKS(100000));
-//       // 打印loop()所在核心
-//   Serial.print("loop() 运行在核心：");
-//   Serial.println(xPortGetCoreID());
 }

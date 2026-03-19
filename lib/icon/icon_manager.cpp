@@ -5,8 +5,7 @@ static IconState iconStates[ICON_COUNT] = {
     ICON_STATE_OFF,  // ICON_LIGHT
     ICON_STATE_OFF,  // ICON_FAN
     ICON_STATE_OFF,  // ICON_AUTO
-    ICON_STATE_OFF,  // ICON_WIFI
-    ICON_STATE_OFF   // ICON_WEATHER
+    ICON_STATE_OFF   // ICON_WIFI
 };
 
 void iconManagerSetup() {
