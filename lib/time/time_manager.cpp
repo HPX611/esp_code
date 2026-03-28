@@ -8,19 +8,44 @@ int currentMonth = 1;
 int currentDay = 1;
 
 bool networkConnected = true;
-bool lastNetworkStatus = true;
-unsigned long lastNetworkCheck = 0;
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 
 unsigned long lastSyncTime = 0;
 unsigned long lastSyncEpoch = 0;
-bool usingOfflineTime = false;
 
 Preferences timePrefs;
 const char* TIME_PREF_NAMESPACE = "time-config";
 const char* TIME_PREF_KEY = "epoch";
+
+void applyTimeFromEpoch(unsigned long epoch) {
+    struct tm* ptm = gmtime((time_t*)&epoch);
+    if (ptm == NULL) return;
+    
+    currentHour = (ptm->tm_hour + 8) % 24;
+    currentMinute = ptm->tm_min;
+    currentSecond = ptm->tm_sec;
+    currentYear = ptm->tm_year + 1900;
+    currentMonth = ptm->tm_mon + 1;
+    currentDay = ptm->tm_mday;
+}
+
+void syncNTPTime() {
+    if (!timeClient.update()) return;
+    
+    unsigned long epoch = timeClient.getEpochTime();
+    if (epoch == 0) return;
+    
+    lastSyncTime = millis();
+    lastSyncEpoch = epoch;
+    
+    timePrefs.begin(TIME_PREF_NAMESPACE, false);
+    timePrefs.putULong(TIME_PREF_KEY, epoch);
+    timePrefs.end();
+    
+    applyTimeFromEpoch(epoch);
+}
 
 void timeSetup() {
     timeClient.begin();
@@ -32,109 +57,32 @@ void timeSetup() {
     if (savedEpoch > 0) {
         lastSyncEpoch = savedEpoch;
         lastSyncTime = millis();
-        usingOfflineTime = true;
-        
-        struct tm *ptm = gmtime((time_t *)&lastSyncEpoch);
-        if (ptm != NULL) {
-            currentHour = (ptm->tm_hour + 8) % 24;
-            currentMinute = ptm->tm_min;
-            currentSecond = ptm->tm_sec;
-            currentYear = ptm->tm_year + 1900;
-            currentMonth = ptm->tm_mon + 1;
-            currentDay = ptm->tm_mday;
-        }
+        applyTimeFromEpoch(savedEpoch);
     }
 }
 
 void updateTime() {
+    static unsigned long lastNetworkCheck = 0;
+    static unsigned long lastNTPSync = 0;
+    
     if (millis() - lastNetworkCheck >= NETWORK_CHECK_INTERVAL) {
         lastNetworkCheck = millis();
-        bool previousNetworkStatus = networkConnected;
-        networkConnected = WiFi.status() == WL_CONNECTED;
-        
-        if (previousNetworkStatus && !networkConnected) {
-            usingOfflineTime = true;
-        }
-        
-        if (!previousNetworkStatus && networkConnected) {
-            usingOfflineTime = false;
-            timeClient.update();
-        }
+        networkConnected = (WiFi.status() == WL_CONNECTED);
     }
     
-    // 每次循环都更新时间，确保时间准确性
-    unsigned long currentEpoch = 0;
-    
-    if (networkConnected) {
-        static unsigned long lastNTPUpdate = 0;
-        if (millis() - lastNTPUpdate >= NTP_UPDATE_INTERVAL) {
-            lastNTPUpdate = millis();
-            if (timeClient.update()) {
-                currentEpoch = timeClient.getEpochTime();
-                lastSyncTime = millis();
-                lastSyncEpoch = currentEpoch;
-                usingOfflineTime = false;
-                
-                timePrefs.begin(TIME_PREF_NAMESPACE, false);
-                timePrefs.putULong(TIME_PREF_KEY, currentEpoch);
-                timePrefs.end();
-            }
-        }
-        
-        if (lastSyncEpoch > 0) {
-            // 精确计算当前时间，避免跳秒
-            currentEpoch = lastSyncEpoch + (millis() - lastSyncTime) / 1000;
-        }
-    } else {
-        if (lastSyncEpoch > 0) {
-            // 离线时也使用精确计算
-            currentEpoch = lastSyncEpoch + (millis() - lastSyncTime) / 1000;
-        } else {
-            // 无同步时间时的备用方案
-            static unsigned long lastSecondUpdate = 0;
-            if (millis() - lastSecondUpdate >= 1000) {
-                lastSecondUpdate = millis();
-                currentSecond++;
-                if (currentSecond >= 60) {
-                    currentSecond = 0;
-                    currentMinute++;
-                    if (currentMinute >= 60) {
-                        currentMinute = 0;
-                        currentHour++;
-                        if (currentHour >= 24) {
-                            currentHour = 0;
-                            currentDay++;
-                            if (currentDay > 31) {
-                                currentDay = 1;
-                                currentMonth++;
-                                if (currentMonth > 12) {
-                                    currentMonth = 1;
-                                    currentYear++;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        usingOfflineTime = true;
+    if (networkConnected && millis() - lastNTPSync >= NTP_UPDATE_INTERVAL) {
+        lastNTPSync = millis();
+        syncNTPTime();
     }
     
-    if (currentEpoch > 0) {
-        struct tm *ptm = gmtime((time_t *)&currentEpoch);
-        if (ptm != NULL) {
-            currentHour = (ptm->tm_hour + 8) % 24;
-            currentMinute = ptm->tm_min;
-            currentSecond = ptm->tm_sec;
-            currentYear = ptm->tm_year + 1900;
-            currentMonth = ptm->tm_mon + 1;
-            currentDay = ptm->tm_mday;
-        }
+    if (lastSyncEpoch > 0) {
+        unsigned long currentEpoch = lastSyncEpoch + (millis() - lastSyncTime) / 1000;
+        applyTimeFromEpoch(currentEpoch);
     }
 }
 
 String getFormattedTime() {
-    char timeString[9];
-    sprintf(timeString, "%02d:%02d:%02d", currentHour, currentMinute, currentSecond);
+    char timeString[6];
+    sprintf(timeString, "%02d:%02d", currentHour, currentMinute);
     return String(timeString);
 }

@@ -1,5 +1,5 @@
-#ifndef __BLYNK_HsmartControl
-#define __BLYNK_H
+#ifndef BLYNK_H
+#define BLYNK_H
 
 // Blynk设备信息
 #define BLYNK_TEMPLATE_ID           "TMPL6O-vSE-3M"
@@ -17,8 +17,8 @@
 #define VIRTUAL_PIN_TERMINAL                    V7      // 终端信息
 #define VIRTUAL_PIN_WIFI_RESET                  V8      // WiFi配置重置
 #define VIRTUAL_PIN_LIGHT_ONLINE                V9      // 灯光在线状态
-#define VIRTUAL_PIN_FAN_ONLINE                 V10     // 风扇在线状态
-#define VIRTUAL_PIN_AUTO_MODE                  V11     // 自动模式
+#define VIRTUAL_PIN_FAN_ONLINE                  V10     // 风扇在线状态
+#define VIRTUAL_PIN_AUTO_MODE                   V11     // 自动模式
 
 #endif // !__BLYNK_H
 

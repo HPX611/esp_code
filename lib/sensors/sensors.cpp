@@ -14,7 +14,7 @@ unsigned long lastDHTReadTime = 0;
 unsigned long lastLightReadTime = 0;
 unsigned long lastMotionDetectedTime = 0;
 
-const unsigned long MOTION_TIMEOUT = 60000; // 30秒的超时时间，可根据实际需要调整
+const unsigned long MOTION_TIMEOUT = 5000;
 
 const unsigned long DHT_READ_INTERVAL = 2000;
 const unsigned long LIGHT_READ_INTERVAL = 1000;
@@ -54,6 +54,9 @@ void sensorsSetup() {
     dht.begin();
     initGY30();
     pinMode(PIR_PIN, INPUT);
+    
+    lastMotionDetectedTime = millis() - MOTION_TIMEOUT - 1000;
+    motionDetected = false;
 }
 
 void sensorsLoop() {
@@ -76,19 +79,24 @@ void sensorsLoop() {
     
     bool currentMotionState = digitalRead(PIR_PIN);
     
-    if (currentMotionState != lastMotionState) {
-        lastMotionState = currentMotionState;
-        if (currentMotionState == HIGH) {
-            lastMotionDetectedTime = millis();
-            motionDetected = true;
-        }
+    static unsigned long lastDebugTime = 0;
+    if (millis() - lastDebugTime > 5000) {
+        lastDebugTime = millis();
+        Serial.print("[PIR] 状态: ");
+        Serial.print(currentMotionState ? "HIGH(有人)" : "LOW(无人)");
+        Serial.print(" | 距上次: ");
+        Serial.print((millis() - lastMotionDetectedTime) / 1000);
+        Serial.print("秒 | 结果: ");
+        Serial.println(motionDetected ? "有人" : "无人");
     }
     
-    // 检查是否在超时时间内，确保静止时也能检测到人体存在
-    if (millis() - lastMotionDetectedTime <= MOTION_TIMEOUT) {
+    if (currentMotionState == HIGH) {
+        lastMotionDetectedTime = millis();
         motionDetected = true;
     } else {
-        motionDetected = false;
+        if (millis() - lastMotionDetectedTime > MOTION_TIMEOUT) {
+            motionDetected = false;
+        }
     }
 }
 

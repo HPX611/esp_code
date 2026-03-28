@@ -1,20 +1,15 @@
 // ESP32智能桌面环境控制系统主机主文件
 
-// Blynk所需文件
 #define BLYNK_PRINT Serial
 #include "../include/blynk.h"
 #include <BlynkSimpleEsp32.h>
-// #include <BlynkTimer.h>
 
-// 全局定时器对象
 BlynkTimer timer;
 
-// FreeRTOS头文件 - 用于多线程任务管理
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/semphr.h>
+#include <soc/rtc.h>
 
-// 引入模块
 #include "../include/wifi_config.h"
 #include <slave_comm.h>
 #include <sensors.h>
@@ -22,538 +17,480 @@ BlynkTimer timer;
 #include "../lib/time/time_manager.h"
 #include "../lib/icon/icon_manager.h"
 
-// FreeRTOS任务函数声明
 void vWiFiTask(void *pvParameters);
 void vSlaveCommTask(void *pvParameters);
 void vBlynkTask(void *pvParameters);
 
-// 中断处理函数声明
 IRAM_ATTR void autoModeButtonISR();
 IRAM_ATTR void wifiResetButtonISR();
 
-// 全局状态变量
-bool g_lightPowerState = false;     // 灯光电源开关状态（开/关）
-int g_lightBrightness = 255;          // 灯光亮度值（0-255）
-bool g_fanPowerState = false;       // 风扇电源开关状态（开/关）
-int g_fanSpeed = 255;               // 风扇速度值（0-255）
-bool g_autoMode = true;             // 自动模式状态
+volatile bool g_lightPowerState = false;
+volatile int g_lightBrightness = 255;
+volatile bool g_fanPowerState = false;
+volatile int g_fanSpeed = 255;
+volatile bool g_autoMode = true;
 
-// 智能控制阈值
-int LIGHT_LEVEL_THRESHOLD = 30;    // 光照阈值（低于此值自动开灯）
-int TEMPERATURE_THRESHOLD = 28;     // 温度阈值（高于此值自动开风扇）
+volatile bool g_autoModeButtonPressed = false;
+volatile bool g_wifiResetButtonPressed = false;
 
-// Blynk应用程序的界面组件
+int LIGHT_LEVEL_THRESHOLD = 200;
+int TEMPERATURE_THRESHOLD = 28;
+
 WidgetTerminal g_terminal(VIRTUAL_PIN_TERMINAL);
 
-// 自动模式物理按键
-const int AUTO_MODE_BUTTON_PIN = 25; // 自动模式物理按键
-// 网络配置重置按键
-const int WIFI_RESET_BUTTON_PIN = 26; // 网络配置重置物理按键
+const int AUTO_MODE_BUTTON_PIN = 25;
+const int WIFI_RESET_BUTTON_PIN = 26;
+const unsigned long DEBOUNCE_DELAY = 50;
 
-// 按键去抖延迟
-const unsigned long debounceDelay = 50;
-
-// FreeRTOS任务句柄
 TaskHandle_t xWiFiTaskHandle = NULL;
 TaskHandle_t xSlaveCommTaskHandle = NULL;
-TaskHandle_t xAutoModeButtonTaskHandle = NULL;
 TaskHandle_t xBlynkTaskHandle = NULL;
 
-// 同步原语 - 用于多线程环境下的资源保护
-SemaphoreHandle_t xStateMutex = NULL;
+portMUX_TYPE stateSpinlock = portMUX_INITIALIZER_UNLOCKED;
 
-// 互斥锁操作宏，简化代码
-#define LOCK_STATE() xSemaphoreTake(xStateMutex, portMAX_DELAY)
-#define UNLOCK_STATE() xSemaphoreGive(xStateMutex)
+#define LOCK_STATE() portENTER_CRITICAL(&stateSpinlock)
+#define UNLOCK_STATE() portEXIT_CRITICAL(&stateSpinlock)
 
-// 中断处理函数
 IRAM_ATTR void autoModeButtonISR() {
     unsigned long debounceStart = millis();
-    while((millis() - debounceStart) < debounceDelay);
+    while((millis() - debounceStart) < DEBOUNCE_DELAY);
     
-    // 检查按键是否仍然按下
     if (digitalRead(AUTO_MODE_BUTTON_PIN) == LOW) {
-        // LOCK_STATE();
         g_autoMode = !g_autoMode;
-        // Serial.print("物理按键 - 自动模式: ");
-        // Serial.println(g_autoMode ? "ON" : "OFF");
+        g_autoModeButtonPressed = true;
         updateIconState(ICON_AUTO, g_autoMode ? ICON_STATE_ON : ICON_STATE_OFF);
-        // UNLOCK_STATE();
     }
 }
 
 IRAM_ATTR void wifiResetButtonISR() {
     unsigned long debounceStart = millis();
-    while((millis() - debounceStart) < debounceDelay);
+    while((millis() - debounceStart) < DEBOUNCE_DELAY);
     
-    // 检查按键是否仍然按下
     if (digitalRead(WIFI_RESET_BUTTON_PIN) == LOW) {
-        // Serial.println("物理按键 - WiFi配置重置请求...");
-        // g_terminal.println("物理按键 - WiFi配置重置请求...");
-        // 重置WiFi配置
-        resetWiFiConfig();
-        // 注意：resetWiFiConfig()函数会重启设备，所以下面的代码不会执行
+        g_wifiResetButtonPressed = true;
     }
 }
 
-// 任务创建宏，简化代码
-#define CREATE_TASK(task_func, task_name, stack_size, priority, task_handle, core_id) \
-    xTaskCreatePinnedToCore( \
-        task_func, \
-        task_name, \
-        stack_size, \
-        NULL, \
-        priority, \
-        &task_handle, \
-        core_id \
-    )
-
-/**
- * @brief 处理设备状态控制
- * @param device 设备类型
- * @param state 设备状态
- * @param stateVar 状态变量
- * @param switchPin 开关引脚
- * @param brightnessPin 亮度引脚
- * @param brightnessVar 亮度变量
- * @param deviceName 设备名称
- */
-void handleDeviceControl(const char* device, bool state, bool &stateVar, int switchPin, int brightnessPin, int &brightnessVar, const char* deviceName) {
-    LOCK_STATE();
-    stateVar = state;
-    
-    Serial.print(deviceName);
-    Serial.print("状态: ");
-    Serial.println(stateVar ? "ON" : "OFF");
-    g_terminal.print(deviceName);
-    g_terminal.print("状态: ");
-    g_terminal.println(stateVar ? "ON" : "OFF");
-    
-    // 发送命令到从机
-    sendCommand(device, CMD_POWER, stateVar ? "1" : "0");
-    
-    // 如果开启设备，应用当前亮度/速度
-    if (stateVar) {
-        sendCommand(device, CMD_BRIGHTNESS, String(brightnessVar).c_str());
-    }
-    
-    UNLOCK_STATE();
-}
-
-/**
- * @brief 处理设备亮度/速度控制
- * @param device 设备类型
- * @param value 亮度/速度值
- * @param valueVar 亮度/速度变量
- * @param powerState 电源状态
- * @param controlPin 控制引脚
- * @param controlName 控制名称
- */
-void handleDeviceControlValue(const char* device, int value, int &valueVar, bool powerState, int controlPin, const char* controlName) {
-    value = constrain(value, 0, 255);  // 确保在0-255范围内
-    
-    LOCK_STATE();
-    valueVar = value;
-    
-    Serial.print(controlName);
-    Serial.print(": ");
-    Serial.println(valueVar);
-    g_terminal.print(controlName);
-    g_terminal.print(": ");
-    g_terminal.println(valueVar);
-    
-    // 发送命令到从机
-    if (powerState) {
-        sendCommand(device, CMD_BRIGHTNESS, String(valueVar).c_str());
-    }
-    
-    UNLOCK_STATE();
-}
-
-/**
- * @brief 处理自动模式下的设备控制
- * @param device 设备类型
- * @param shouldTurnOn 是否应该开启设备
- * @param currentState 当前设备状态
- * @param stateVar 状态变量
- * @param switchPin 开关引脚
- * @param brightnessVar 亮度/速度变量
- * @param actionName 操作名称
- */
-void handleAutoDeviceControl(const char* device, bool shouldTurnOn, bool currentState, bool &stateVar, int switchPin, int brightnessVar, const char* actionName) {
-    if (shouldTurnOn && !currentState) {
-        // 开启设备
-        stateVar = true;
-        Blynk.virtualWrite(switchPin, 1);
-        sendCommand(device, CMD_POWER, "1");
-        sendCommand(device, CMD_BRIGHTNESS, String(brightnessVar).c_str());
-        Serial.print("自动模式: ");
-        Serial.println(actionName);
-    } else if (!shouldTurnOn && currentState) {
-        // 关闭设备
-        stateVar = false;
-        Blynk.virtualWrite(switchPin, 0);
-        sendCommand(device, CMD_POWER, "0");
-        Serial.print("自动模式: ");
-        Serial.println(actionName);
-    }
-}
-
-// 灯光开关控制
-BLYNK_WRITE(VIRTUAL_PIN_LIGHT_SWITCH)
-{
-    int value = param.asInt();
-    Serial.print("[Blynk] Light switch pressed: ");
-    Serial.println(value);
-    handleDeviceControl(DEVICE_LIGHT, (value == 1), g_lightPowerState, VIRTUAL_PIN_LIGHT_SWITCH, VIRTUAL_PIN_LIGHT_BRIGHTNESS, g_lightBrightness, "灯光开关");
-}
-
-// 灯光亮度控制
-BLYNK_WRITE(VIRTUAL_PIN_LIGHT_BRIGHTNESS)
-{
-    int value = param.asInt();
-    int mappedValue = map(value, 0, 100, 0, 255);
-    handleDeviceControlValue(DEVICE_LIGHT, mappedValue, g_lightBrightness, g_lightPowerState, VIRTUAL_PIN_LIGHT_BRIGHTNESS, "灯光亮度");
-}
-
-// 风扇开关控制
-BLYNK_WRITE(VIRTUAL_PIN_FAN_SWITCH)
-{
-    int value = param.asInt();
-    handleDeviceControl(DEVICE_FAN, (value == 1), g_fanPowerState, VIRTUAL_PIN_FAN_SWITCH, VIRTUAL_PIN_FAN_SPEED, g_fanSpeed, "风扇开关");
-}
-
-// 风扇速度控制
-BLYNK_WRITE(VIRTUAL_PIN_FAN_SPEED)
-{
-    int value = param.asInt();
-    int mappedValue = map(value, 0, 100, 0, 255);
-    handleDeviceControlValue(DEVICE_FAN, mappedValue, g_fanSpeed, g_fanPowerState, VIRTUAL_PIN_FAN_SPEED, "风扇速度");
-}
-
-// 自动模式控制
-BLYNK_WRITE(VIRTUAL_PIN_AUTO_MODE)
-{
-    int value = param.asInt();
-    
-    // 获取互斥锁保护全局变量
-    LOCK_STATE();
-    g_autoMode = (value == 1);
-    
-    Serial.print("自动模式: ");
-    Serial.println(g_autoMode ? "ON" : "OFF");
-    g_terminal.print("自动模式: ");
-    g_terminal.println(g_autoMode ? "ON" : "OFF");
-    
-    // 更新自动模式图标状态
-    updateIconState(ICON_AUTO, g_autoMode ? ICON_STATE_ON : ICON_STATE_OFF);
-    
-    // 释放互斥锁
-    UNLOCK_STATE();
-}
-
-// 终端输入处理
-BLYNK_WRITE(VIRTUAL_PIN_TERMINAL)
-{
-    String input = param.asStr();
-    input.trim();
-    
-    // 处理阈值调整命令
-    if (input.length() > 0) {
-        // 解析输入的两个整数
-        int firstSpace = input.indexOf(' ');
-        if (firstSpace != -1) {
-            String tempStr = input.substring(0, firstSpace);
-            String lightStr = input.substring(firstSpace + 1);
-            
-            int newTemp = tempStr.toInt();
-            int newLight = lightStr.toInt();
-            
-            if (newTemp > 0 && newLight > 0) {
-                TEMPERATURE_THRESHOLD = newTemp;
-                LIGHT_LEVEL_THRESHOLD = newLight;
-                
-                Serial.print("阈值已更新 - 温度: ");
-                Serial.print(TEMPERATURE_THRESHOLD);
-                Serial.print(", 光照: ");
-                Serial.println(LIGHT_LEVEL_THRESHOLD);
-                
-                g_terminal.print("阈值已更新 - 温度: ");
-                g_terminal.print(TEMPERATURE_THRESHOLD);
-                g_terminal.print(", 光照: ");
-                g_terminal.println(LIGHT_LEVEL_THRESHOLD);
-            }
+void handleButtonPresses() {
+    if (g_autoModeButtonPressed) {
+        g_autoModeButtonPressed = false;
+        Serial.printf("[按键] 自动模式: %s\n", g_autoMode ? "开启" : "关闭");
+        g_terminal.printf("[按键] 自动模式: %s\n", g_autoMode ? "开启" : "关闭");
+        
+        if (Blynk.connected()) {
+            Blynk.virtualWrite(VIRTUAL_PIN_AUTO_MODE, g_autoMode ? 1 : 0);
         }
     }
-    g_terminal.flush();
-}
-
-// WiFi配置重置控制
-BLYNK_WRITE(VIRTUAL_PIN_WIFI_RESET)
-{
-    int value = param.asInt();
     
-    if (value == 1) {
-        Serial.println("WiFi配置重置请求...");
-        g_terminal.println("WiFi配置重置请求...");
-        
-        // 重置WiFi配置
+    if (g_wifiResetButtonPressed) {
+        g_wifiResetButtonPressed = false;
+        Serial.println("[按键] WiFi重置");
+        g_terminal.println("[按键] WiFi重置");
         resetWiFiConfig();
-        // 注意：resetWiFiConfig()函数会重启设备，所以下面的代码不会执行
     }
 }
 
-// 连接成功时同步状态
-BLYNK_CONNECTED()
-{
-    Serial.println("[Blynk] Connected, syncing state...");
-    g_terminal.println("Blynk连接成功,同步状态...");
-    
-    // 获取互斥锁保护全局变量
-    LOCK_STATE();
-    // 同步设备状态
-    Serial.print("[Blynk] Syncing light switch: ");
-    Serial.println(g_lightPowerState ? 1 : 0);
-    Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_SWITCH, g_lightPowerState ? 1 : 0);
-    
-    Serial.print("[Blynk] Syncing light brightness: ");
-    Serial.println(g_lightBrightness);
-    Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_BRIGHTNESS, g_lightBrightness);
-    
-    Serial.print("[Blynk] Syncing fan switch: ");
-    Serial.println(g_fanPowerState ? 1 : 0);
-    Blynk.virtualWrite(VIRTUAL_PIN_FAN_SWITCH, g_fanPowerState ? 1 : 0);
-    
-    Serial.print("[Blynk] Syncing fan speed: ");
-    Serial.println(g_fanSpeed);
-    Blynk.virtualWrite(VIRTUAL_PIN_FAN_SPEED, g_fanSpeed);
-    
-    Serial.print("[Blynk] Syncing auto mode: ");
-    Serial.println(g_autoMode ? 1 : 0);
-    Blynk.virtualWrite(VIRTUAL_PIN_AUTO_MODE, g_autoMode ? 1 : 0);
-    
-    // 同步设备在线状态
-    Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_ONLINE, isLightConnected() ? 1 : 0);
-    Blynk.virtualWrite(VIRTUAL_PIN_FAN_ONLINE, isFanConnected() ? 1 : 0);
-    
-    // 释放互斥锁
-    UNLOCK_STATE();
-    
-    Serial.println("[Blynk] State sync completed");
-}
-
-// 智能控制逻辑
-void smartControl() {
-    // 获取互斥锁保护全局变量
-    LOCK_STATE();
-    if (!g_autoMode) {
-        UNLOCK_STATE();
+void controlLight(bool turnOn) {
+    if (!isLightConnected()) {
+        g_terminal.println("错误: 灯光从机离线");
+        Serial.println("[控制] 灯光从机离线");
         return;
     }
     
-    bool motion = isMotionDetected();
-    int lightLevel = getLightLevel();
-    float temperature = getTemperature();
-
-    // 基于人体检测和光照的灯光控制
-    bool shouldTurnOnLight = motion && (lightLevel < LIGHT_LEVEL_THRESHOLD);
-    handleAutoDeviceControl(DEVICE_LIGHT, shouldTurnOnLight, g_lightPowerState, g_lightPowerState, VIRTUAL_PIN_LIGHT_SWITCH, g_lightBrightness, shouldTurnOnLight ? "开灯" : "关灯");
-    
-    // 基于温度的风扇控制
-    bool shouldTurnOnFan = motion && (temperature > TEMPERATURE_THRESHOLD);
-    handleAutoDeviceControl(DEVICE_FAN, shouldTurnOnFan, g_fanPowerState, g_fanPowerState, VIRTUAL_PIN_FAN_SWITCH, g_fanSpeed, shouldTurnOnFan ? "开风扇" : "关风扇");
-    
-    // 释放互斥锁
+    LOCK_STATE();
+    g_lightPowerState = turnOn;
     UNLOCK_STATE();
+    
+    if (Blynk.connected()) {
+        Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_SWITCH, turnOn ? 1 : 0);
+    }
+    
+    sendCommand(DEVICE_LIGHT, CMD_POWER, turnOn ? "1" : "0");
+    if (turnOn) {
+        int bright;
+        LOCK_STATE();
+        bright = g_lightBrightness;
+        UNLOCK_STATE();
+        sendCommand(DEVICE_LIGHT, CMD_BRIGHTNESS, String(bright).c_str());
+    }
+    
+    Serial.printf("[控制] 灯光: %s\n", turnOn ? "已开启" : "已关闭");
+    g_terminal.printf("[控制] 灯光: %s\n", turnOn ? "已开启" : "已关闭");
 }
 
-void setup()
-{
-  // Debug console
-  Serial.begin(115200);
-  Serial.println("ESP32 Starting...");
+void controlFan(bool turnOn) {
+    if (!isFanConnected()) {
+        g_terminal.println("错误: 风扇从机离线");
+        Serial.println("[控制] 风扇从机离线");
+        return;
+    }
+    
+    LOCK_STATE();
+    g_fanPowerState = turnOn;
+    UNLOCK_STATE();
+    
+    if (Blynk.connected()) {
+        Blynk.virtualWrite(VIRTUAL_PIN_FAN_SWITCH, turnOn ? 1 : 0);
+    }
+    
+    sendCommand(DEVICE_FAN, CMD_POWER, turnOn ? "1" : "0");
+    if (turnOn) {
+        int speed;
+        LOCK_STATE();
+        speed = g_fanSpeed;
+        UNLOCK_STATE();
+        sendCommand(DEVICE_FAN, CMD_BRIGHTNESS, String(speed).c_str());
+    }
+    
+    Serial.printf("[控制] 风扇: %s\n", turnOn ? "已开启" : "已关闭");
+    g_terminal.printf("[控制] 风扇: %s\n", turnOn ? "已开启" : "已关闭");
+}
 
-  // 初始化互斥锁
-  xStateMutex = xSemaphoreCreateMutex();
-  if (xStateMutex == NULL) {
-    Serial.println("Error creating mutex!");
-  }
+void setLightBrightness(int value) {
+    value = constrain(value, 0, 255);
+    LOCK_STATE();
+    g_lightBrightness = value;
+    UNLOCK_STATE();
+    
+    if (Blynk.connected()) {
+        Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_BRIGHTNESS, map(value, 0, 255, 0, 100));
+    }
+    
+    Serial.printf("[控制] 灯光亮度: %d%%\n", map(value, 0, 255, 0, 100));
+    g_terminal.printf("[控制] 灯光亮度: %d%%\n", map(value, 0, 255, 0, 100));
+    
+    bool isOn;
+    LOCK_STATE();
+    isOn = g_lightPowerState;
+    UNLOCK_STATE();
+    
+    if (isOn && isLightConnected()) {
+        sendCommand(DEVICE_LIGHT, CMD_BRIGHTNESS, String(value).c_str());
+    }
+}
 
-  // 初始化WiFi：连接或进入配网模式
-  wifiSetup();
-  
-  // 初始化从机通信
-  slaveCommSetup();
-  
-  // 初始化传感器
-  sensorsSetup();
-  
-  // 初始化OLED显示
-  oledSetup();
+void setFanSpeed(int value) {
+    value = constrain(value, 0, 255);
+    LOCK_STATE();
+    g_fanSpeed = value;
+    UNLOCK_STATE();
+    
+    if (Blynk.connected()) {
+        Blynk.virtualWrite(VIRTUAL_PIN_FAN_SPEED, map(value, 0, 255, 0, 100));
+    }
+    
+    Serial.printf("[控制] 风扇速度: %d%%\n", map(value, 0, 255, 0, 100));
+    g_terminal.printf("[控制] 风扇速度: %d%%\n", map(value, 0, 255, 0, 100));
+    
+    bool isOn;
+    LOCK_STATE();
+    isOn = g_fanPowerState;
+    UNLOCK_STATE();
+    
+    if (isOn && isFanConnected()) {
+        sendCommand(DEVICE_FAN, CMD_BRIGHTNESS, String(value).c_str());
+    }
+}
 
-  // 初始化时间管理
-  timeSetup();
-  
-  // 初始化图标管理器
-  iconManagerSetup();
-  
-  // 初始化自动模式物理按键
-  pinMode(AUTO_MODE_BUTTON_PIN, INPUT_PULLUP);
-  // 初始化网络配置重置按键
-  pinMode(WIFI_RESET_BUTTON_PIN, INPUT_PULLUP);
-  
-  // 附加中断
-  attachInterrupt(digitalPinToInterrupt(AUTO_MODE_BUTTON_PIN), autoModeButtonISR, FALLING);
-  attachInterrupt(digitalPinToInterrupt(WIFI_RESET_BUTTON_PIN), wifiResetButtonISR, FALLING);
+void checkAndControlLight() {
+    int light = getLightLevel();
+    bool shouldBeOn = light < LIGHT_LEVEL_THRESHOLD;
+    
+    bool currentState;
+    LOCK_STATE();
+    currentState = g_lightPowerState;
+    UNLOCK_STATE();
+    
+    Serial.printf("[自动-灯] 光照:%dlux 阈值:%d 应:%s 现:%s\n", 
+        light, LIGHT_LEVEL_THRESHOLD, 
+        shouldBeOn ? "开" : "关", 
+        currentState ? "开" : "关");
+    
+    if (shouldBeOn == currentState) return;
+    
+    if (!isLightConnected()) {
+        g_terminal.println("[自动] 灯光从机离线");
+        return;
+    }
+    
+    LOCK_STATE();
+    g_lightPowerState = shouldBeOn;
+    UNLOCK_STATE();
+    
+    if (Blynk.connected()) {
+        Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_SWITCH, shouldBeOn ? 1 : 0);
+    }
+    sendCommand(DEVICE_LIGHT, CMD_POWER, shouldBeOn ? "1" : "0");
+    if (shouldBeOn) {
+        int bright;
+        LOCK_STATE();
+        bright = g_lightBrightness;
+        UNLOCK_STATE();
+        sendCommand(DEVICE_LIGHT, CMD_BRIGHTNESS, String(bright).c_str());
+    }
+    
+    Serial.printf("[自动] %s\n", shouldBeOn ? "开灯(光照不足)" : "关灯(光照充足)");
+    g_terminal.printf("[自动] %s\n", shouldBeOn ? "开灯(光照不足)" : "关灯(光照充足)");
+}
 
-  // 如果WiFi未处于配网模式，则配置Blynk
-  if (!isInConfigMode()) {
-    Blynk.config(BLYNK_AUTH_TOKEN);
-  }
+void checkAndControlFan() {
+    float temp = getTemperature();
+    bool shouldBeOn = temp > TEMPERATURE_THRESHOLD;
+    
+    bool currentState;
+    LOCK_STATE();
+    currentState = g_fanPowerState;
+    UNLOCK_STATE();
+    
+    Serial.printf("[自动-扇] 温度:%.1fC 阈值:%d 应:%s 现:%s\n", 
+        temp, TEMPERATURE_THRESHOLD, 
+        shouldBeOn ? "开" : "关", 
+        currentState ? "开" : "关");
+    
+    if (shouldBeOn == currentState) return;
+    
+    if (!isFanConnected()) {
+        g_terminal.println("[自动] 风扇从机离线");
+        return;
+    }
+    
+    LOCK_STATE();
+    g_fanPowerState = shouldBeOn;
+    UNLOCK_STATE();
+    
+    if (Blynk.connected()) {
+        Blynk.virtualWrite(VIRTUAL_PIN_FAN_SWITCH, shouldBeOn ? 1 : 0);
+    }
+    sendCommand(DEVICE_FAN, CMD_POWER, shouldBeOn ? "1" : "0");
+    if (shouldBeOn) {
+        int speed;
+        LOCK_STATE();
+        speed = g_fanSpeed;
+        UNLOCK_STATE();
+        sendCommand(DEVICE_FAN, CMD_BRIGHTNESS, String(speed).c_str());
+    }
+    
+    Serial.printf("[自动] %s\n", shouldBeOn ? "开风扇(温度过高)" : "关风扇(温度适宜)");
+    g_terminal.printf("[自动] %s\n", shouldBeOn ? "开风扇(温度过高)" : "关风扇(温度适宜)");
+}
 
-  // 使用BlynkTimer替代部分FreeRTOS任务
-  // 传感器任务 - 每3秒执行一次
-  timer.setInterval(3000L, []() {
-    sensorsLoop();
-  });
-  
-  // 智能控制任务 - 每500毫秒执行一次
-  timer.setInterval(500L, []() {
-    smartControl();
-  });
-  
-  // 在线状态更新 - 每10秒执行一次
-  timer.setInterval(10000L, []() {
-    if (isWiFiConnected()) {
-      LOCK_STATE();
-      Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_ONLINE, isLightConnected() ? 1 : 0);
-      Blynk.virtualWrite(VIRTUAL_PIN_FAN_ONLINE, isFanConnected() ? 1 : 0);
-      UNLOCK_STATE();
+void turnOffAllDevices() {
+    bool lightState, fanState;
+    LOCK_STATE();
+    lightState = g_lightPowerState;
+    fanState = g_fanPowerState;
+    UNLOCK_STATE();
+    
+    if (lightState && isLightConnected()) {
+        LOCK_STATE();
+        g_lightPowerState = false;
+        UNLOCK_STATE();
+        
+        if (Blynk.connected()) {
+            Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_SWITCH, 0);
+        }
+        sendCommand(DEVICE_LIGHT, CMD_POWER, "0");
+        
+        Serial.println("[自动] 关灯(无人)");
+        g_terminal.println("[自动] 关灯(无人)");
+    }
+    
+    if (fanState && isFanConnected()) {
+        LOCK_STATE();
+        g_fanPowerState = false;
+        UNLOCK_STATE();
+        
+        if (Blynk.connected()) {
+            Blynk.virtualWrite(VIRTUAL_PIN_FAN_SWITCH, 0);
+        }
+        sendCommand(DEVICE_FAN, CMD_POWER, "0");
+        
+        Serial.println("[自动] 关风扇(无人)");
+        g_terminal.println("[自动] 关风扇(无人)");
+    }
+}
+
+void smartControl() {
+    static unsigned long lastLogTime = 0;
+    
+    handleButtonPresses();
+    
+    bool autoMd;
+    LOCK_STATE();
+    autoMd = g_autoMode;
+    UNLOCK_STATE();
+    
+    if (!autoMd) return;
+    
+    bool motion = isMotionDetected();
+    
+    if (millis() - lastLogTime > 5000) {
+        lastLogTime = millis();
+        Serial.printf("[自动] 人体检测: %s\n", motion ? "有人" : "无人");
+    }
+    
+    if (motion) {
+        checkAndControlLight();
+        checkAndControlFan();
     } else {
-      Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_ONLINE, 0);
-      Blynk.virtualWrite(VIRTUAL_PIN_FAN_ONLINE, 0);
-    }
-  });
-  
-  // 传感器数据更新 - 每3秒执行一次
-  timer.setInterval(3000L, []() {
-    if (isWiFiConnected()) {
-      float temp = getTemperature();
-      int light = getLightLevel();
-      bool motion = isMotionDetected();
-      Blynk.virtualWrite(VIRTUAL_PIN_TEMPERATURE, temp);
-      Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_LEVEL, light);
-      Blynk.virtualWrite(VIRTUAL_PIN_MOTION_DETECTION, motion ? 1 : 0);
-      
-      // 发送映射后的速度和亮度数据
-      LOCK_STATE();
-      int mappedFanSpeed = map(g_fanSpeed, 0, 255, 0, 100);
-      int mappedLightBrightness = map(g_lightBrightness, 0, 255, 0, 100);
-      Blynk.virtualWrite(VIRTUAL_PIN_FAN_SPEED, mappedFanSpeed);
-      Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_BRIGHTNESS, mappedLightBrightness);
-      UNLOCK_STATE();
-    }
-  });
-  
-  // 时间管理任务 - 每秒执行一次
-  timer.setInterval(1000L, []() {
-    updateTime();
-  });
-  
-  // OLED显示任务 - 每500毫秒执行一次
-  timer.setInterval(500L, []() {
-    oledLoop();
-  });
-
-  // 创建FreeRTOS任务
-  // Blynk任务 - 核心1，优先级2（按照最佳实践）
-  CREATE_TASK(vBlynkTask, "Blynk Task", 8192, 2, xBlynkTaskHandle, 1);
-
-  // 核心1：运行所有其他任务
-  // WiFi任务 - 核心1，优先级1
-  CREATE_TASK(vWiFiTask, "WiFi Task", 4096, 1, xWiFiTaskHandle, 1);
-
-  // 从机通信任务 - 核心1，优先级3
-  CREATE_TASK(vSlaveCommTask, "Slave Comm Task", 8192, 3, xSlaveCommTaskHandle, 1);
-
-
-  
-  // 按键现在使用中断方式处理，不再需要轮询任务
-
-  Serial.println("All tasks created successfully!");
-  Serial.println("物理按键已配置 - 用于离线控制自动模式和网络重置");
-  Serial.print("网络重置按键引脚: ");
-  Serial.println(WIFI_RESET_BUTTON_PIN);
-}
-
-// WiFi任务函数
-void vWiFiTask(void *pvParameters)
-{
-    while (1) {
-        wifiLoop();
-        vTaskDelay(pdMS_TO_TICKS(10)); // 增加延迟，减少任务切换
+        turnOffAllDevices();
     }
 }
 
-// 从机通信任务函数
-void vSlaveCommTask(void *pvParameters)
-{
-    while (1) {
-        slaveCommLoop();
-        vTaskDelay(pdMS_TO_TICKS(50)); // 增加延迟，减少任务切换
-    }
+BLYNK_WRITE(VIRTUAL_PIN_LIGHT_SWITCH) {
+    Serial.println("[Blynk] 灯光开关控制");
+    controlLight(param.asInt() == 1);
 }
 
+BLYNK_WRITE(VIRTUAL_PIN_LIGHT_BRIGHTNESS) {
+    Serial.println("[Blynk] 灯光亮度控制");
+    setLightBrightness(map(param.asInt(), 0, 100, 0, 255));
+}
 
+BLYNK_WRITE(VIRTUAL_PIN_FAN_SWITCH) {
+    Serial.println("[Blynk] 风扇开关控制");
+    controlFan(param.asInt() == 1);
+}
 
+BLYNK_WRITE(VIRTUAL_PIN_FAN_SPEED) {
+    Serial.println("[Blynk] 风扇速度控制");
+    setFanSpeed(map(param.asInt(), 0, 100, 0, 255));
+}
 
-
-// 打印内存使用情况
-void printMemoryInfo() {
-    // 打印堆内存使用情况
-    size_t freeHeap = ESP.getFreeHeap();
-    size_t minimumFreeHeap = ESP.getMinFreeHeap();
-    size_t heapSize = ESP.getHeapSize();
+BLYNK_WRITE(VIRTUAL_PIN_AUTO_MODE) {
+    LOCK_STATE();
+    g_autoMode = (param.asInt() == 1);
+    UNLOCK_STATE();
     
-    Serial.print("[Memory] Free heap: ");
-    Serial.print(freeHeap);
-    Serial.print(" bytes, Min free heap: ");
-    Serial.print(minimumFreeHeap);
-    Serial.print(" bytes, Total heap: ");
-    Serial.print(heapSize);
-    Serial.println(" bytes");
-    
-    // 打印任务信息
-    UBaseType_t uxCurrentNumberOfTasks = uxTaskGetNumberOfTasks();
-    Serial.print("[Memory] Number of tasks: ");
-    Serial.println(uxCurrentNumberOfTasks);
+    Serial.printf("[Blynk] 自动模式: %s\n", g_autoMode ? "开启" : "关闭");
+    g_terminal.printf("[Blynk] 自动模式: %s\n", g_autoMode ? "开启" : "关闭");
+    updateIconState(ICON_AUTO, g_autoMode ? ICON_STATE_ON : ICON_STATE_OFF);
 }
 
-// Blynk任务函数（核心1版本）
-void vBlynkTask(void *pvParameters)
-{
-    // 如果WiFi未处于配网模式，则配置Blynk
+BLYNK_WRITE(VIRTUAL_PIN_TERMINAL) {
+    String input = param.asStr();
+    input.trim();
+    
+    if (input.length() > 0) {
+        int space = input.indexOf(' ');
+        if (space != -1) {
+            int temp = input.substring(0, space).toInt();
+            int light = input.substring(space + 1).toInt();
+            
+            if (temp > 0 && light > 0) {
+                TEMPERATURE_THRESHOLD = temp;
+                LIGHT_LEVEL_THRESHOLD = light;
+                Serial.printf("[Blynk] 阈值: 温度%dC 光照%dlux\n", temp, light);
+                g_terminal.printf("[Blynk] 阈值: 温度%dC 光照%dlux\n", temp, light);
+            }
+        }
+    }
+}
+
+BLYNK_WRITE(VIRTUAL_PIN_WIFI_RESET) {
+    if (param.asInt() == 1) {
+        Serial.println("[Blynk] WiFi重置");
+        g_terminal.println("[Blynk] WiFi重置");
+        resetWiFiConfig();
+    }
+}
+
+void syncAllStatesToBlynk() {
+    if (!Blynk.connected()) {
+        return;
+    }
+    
+    bool lightState; int lightBright; bool fanState; int fanSpd; bool autoMd;
+    LOCK_STATE();
+    lightState = g_lightPowerState;
+    lightBright = g_lightBrightness;
+    fanState = g_fanPowerState;
+    fanSpd = g_fanSpeed;
+    autoMd = g_autoMode;
+    UNLOCK_STATE();
+    
+    Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_SWITCH, lightState ? 1 : 0);
+    Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_BRIGHTNESS, map(lightBright, 0, 255, 0, 100));
+    Blynk.virtualWrite(VIRTUAL_PIN_FAN_SWITCH, fanState ? 1 : 0);
+    Blynk.virtualWrite(VIRTUAL_PIN_FAN_SPEED, map(fanSpd, 0, 255, 0, 100));
+    Blynk.virtualWrite(VIRTUAL_PIN_AUTO_MODE, autoMd ? 1 : 0);
+    Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_ONLINE, isLightConnected() ? 1 : 0);
+    Blynk.virtualWrite(VIRTUAL_PIN_FAN_ONLINE, isFanConnected() ? 1 : 0);
+    Blynk.virtualWrite(VIRTUAL_PIN_TEMPERATURE, (int)getTemperature());
+    Blynk.virtualWrite(VIRTUAL_PIN_LIGHT_LEVEL, getLightLevel());
+    Blynk.virtualWrite(VIRTUAL_PIN_MOTION_DETECTION, isMotionDetected() ? 1 : 0);
+    
+    Serial.println("[同步] 状态已同步到Blynk");
+}
+
+BLYNK_CONNECTED() {
+    Serial.println("[Blynk] 已连接");
+    g_terminal.println("[Blynk] 已连接");
+    syncAllStatesToBlynk();
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("系统启动...");
+
+    wifiSetup();
+    slaveCommSetup();
+    sensorsSetup();
+    oledSetup();
+    timeSetup();
+    iconManagerSetup();
+    
+    pinMode(AUTO_MODE_BUTTON_PIN, INPUT_PULLUP);
+    pinMode(WIFI_RESET_BUTTON_PIN, INPUT_PULLUP);
+    
+    attachInterrupt(digitalPinToInterrupt(AUTO_MODE_BUTTON_PIN), autoModeButtonISR, FALLING);
+    attachInterrupt(digitalPinToInterrupt(WIFI_RESET_BUTTON_PIN), wifiResetButtonISR, FALLING);
+
     if (!isInConfigMode()) {
         Blynk.config(BLYNK_AUTH_TOKEN);
     }
+
+    timer.setInterval(1000L, smartControl);
+    timer.setInterval(1000L, updateTime);
+    timer.setInterval(1000L, oledLoop);
+    timer.setInterval(2000L, sensorsLoop);
+    timer.setInterval(5000L, syncAllStatesToBlynk);
+
+    xTaskCreatePinnedToCore(vBlynkTask, "Blynk Task", 4096, NULL, 2, &xBlynkTaskHandle, 1);
+    xTaskCreatePinnedToCore(vWiFiTask, "WiFi Task", 4096, NULL, 1, &xWiFiTaskHandle, 1);
+    xTaskCreatePinnedToCore(vSlaveCommTask, "Slave Comm Task", 4096, NULL, 3, &xSlaveCommTaskHandle, 1);
     
+    Serial.println("系统初始化完成");
+}
+
+void vWiFiTask(void *pvParameters) {
+    while (1) {
+        wifiLoop();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+void vSlaveCommTask(void *pvParameters) {
+    while (1) {
+        slaveCommLoop();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+void vBlynkTask(void *pvParameters) {
     while(1) {
-        // 核心操作：频繁调用 Blynk.run()
-        Blynk.run();
-        // 运行Blynk定时器任务
-        timer.run();
-        // 短延迟，确保任务响应及时
+        if (isWiFiConnected()) {
+            if (!Blynk.connected()) {
+                Serial.println("[Blynk] 重连中...");
+                Blynk.connect();
+            }
+            Blynk.run();
+            timer.run();
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
-
-
-
-
-// 按键现在使用中断方式处理，原有的轮询任务已移除
-
-void loop()
-{
-    vTaskDelay(pdMS_TO_TICKS(100000));
+void loop() {
+    vTaskDelete(NULL);
 }
